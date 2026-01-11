@@ -3,6 +3,8 @@ from pathlib import Path
 # Resolve project root
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+BASE_DIR = Path("/opt/airflow")
+
 # Data directories
 DATA_DIR = PROJECT_ROOT / "data"
 BRONZE_DIR = DATA_DIR / "bronze"

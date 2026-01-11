@@ -1,68 +1,50 @@
-------------------------------------------------------
--- GOLD LAYER: DIMENSION TABLES
-------------------------------------------------------
+-- ------------------------------------------------------
+-- -- GOLD LAYER: DIMENSION TABLES
+-- ------------------------------------------------------
 
-CREATE OR REPLACE TABLE dim_student AS
-SELECT
-    student_id,
-    student_name
-FROM read_parquet('data/silver/students.parquet');
+CREATE TABLE IF NOT EXISTS dim_student (
+    student_key     INTEGER PRIMARY KEY,
+    student_id      VARCHAR,
+    student_name    VARCHAR
+);
 
-CREATE OR REPLACE TABLE dim_teacher AS
-SELECT
-    teacher_id,
-    teacher_name
-FROM read_parquet('data/silver/teachers.parquet');
+CREATE TABLE IF NOT EXISTS dim_teacher (
+    teacher_key     INTEGER PRIMARY KEY,
+    teacher_id      VARCHAR,
+    teacher_name    VARCHAR
+);
 
-CREATE OR REPLACE TABLE dim_school AS
-SELECT
-    school_id,
-    school_name
-FROM read_parquet('data/silver/schools.parquet');
+CREATE TABLE IF NOT EXISTS dim_school (
+    school_key      INTEGER PRIMARY KEY,
+    school_id       VARCHAR,
+    school_name     VARCHAR,
+    municipality    VARCHAR
+);
 
-CREATE OR REPLACE TABLE dim_test AS
-SELECT
-    test_id,
-    test_name
-FROM read_parquet('data/silver/tests.parquet');
+CREATE TABLE IF NOT EXISTS dim_test (
+    test_key        INTEGER PRIMARY KEY,
+    test_id         VARCHAR,
+    test_name       VARCHAR,
+    assessment_type VARCHAR
+);
 
-------------------------------------------------------
--- OPTIONAL: GRADING GROUP DIMENSION
-------------------------------------------------------
+-- ------------------------------------------------------
+-- -- FACT TABLE
+-- ------------------------------------------------------
 
-CREATE OR REPLACE TABLE dim_grading_group AS
-SELECT
-    CASE
-        WHEN score >= 85 THEN 'A'
-        WHEN score >= 70 THEN 'B'
-        WHEN score >= 55 THEN 'C'
-        WHEN score >= 40 THEN 'D'
-        ELSE 'F'
-    END AS grading_group,
-    MIN(score) AS min_score,
-    MAX(score) AS max_score
-FROM read_parquet('data/silver/test_details.parquet')
-GROUP BY grading_group;
+CREATE TABLE IF NOT EXISTS fact_test_results (
+    test_result_key INTEGER PRIMARY KEY,
+    student_key     INTEGER,
+    teacher_key     INTEGER,
+    school_key      INTEGER,
+    test_key        INTEGER,
+    exam_date       DATE,
+    score           DOUBLE,
 
-------------------------------------------------------
--- FACT TABLE
-------------------------------------------------------
+    FOREIGN KEY (student_key) REFERENCES dim_student(student_key),
+    FOREIGN KEY (teacher_key) REFERENCES dim_teacher(teacher_key),
+    FOREIGN KEY (school_key)  REFERENCES dim_school(school_key),
+    FOREIGN KEY (test_key)    REFERENCES dim_test(test_key)
+);
 
-CREATE OR REPLACE TABLE fact_test_results AS
-SELECT
-    ev.student_id,
-    ev.teacher_id,
-    ev.school_id,
-    ev.test_id,
-    td.exam_date,
-    td.score,
-    CASE
-        WHEN td.score >= 85 THEN 'A'
-        WHEN td.score >= 70 THEN 'B'
-        WHEN td.score >= 55 THEN 'C'
-        WHEN td.score >= 40 THEN 'D'
-        ELSE 'F'
-    END AS grading_group
-FROM read_parquet('data/silver/student_evaluation_cleaned.parquet') ev
-JOIN read_parquet('data/silver/test_details.parquet') td
-  ON ev.test_id = td.test_id;
+

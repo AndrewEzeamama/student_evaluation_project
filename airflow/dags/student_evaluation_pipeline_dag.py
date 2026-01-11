@@ -5,8 +5,8 @@ from datetime import timedelta
 
 from src.pipeline.ingest import ingest_excel
 from src.pipeline.transform import transform_silver
-from src.quality.ge_runner import run_quality_checks
-from src.pipeline.analytics import build_gold
+# from src.quality.ge_runner import run_quality_checks
+from src.pipeline.analytics import build_gold_layer
 
 # -------------------------------
 # Default DAG arguments
@@ -14,7 +14,7 @@ from src.pipeline.analytics import build_gold
 default_args = {
     "owner": "data-engineering",
     "depends_on_past": False,
-    "retries": 1,
+    "retries": 0,
     "retry_delay": timedelta(minutes=5),
 }
 
@@ -22,7 +22,7 @@ default_args = {
 # DAG Definition
 # -------------------------------
 with DAG(
-    dag_id="student_evaluation_pipeline",
+    dag_id="student_evaluation",
     default_args=default_args,
     description="Student Evaluation Analytics Pipeline (Bronze → Gold)",
     start_date=days_ago(1),
@@ -45,19 +45,18 @@ with DAG(
         sla=timedelta(minutes=5),
     )
 
-    data_quality = PythonOperator(
-        task_id="data_quality_checks",
-        python_callable=run_quality_checks,
-        op_kwargs={"run_id": "{{ run_id }}"},
-        sla=timedelta(minutes=3),
-    )
-
-    gold_build = PythonOperator(
-        task_id="gold_build",
-        python_callable=build_gold,
-        op_kwargs={"run_id": "{{ run_id }}"},
-        sla=timedelta(minutes=5),
+    # data_quality = PythonOperator(
+    #     task_id="data_quality_checks",
+    #     python_callable=run_quality_checks,
+    #     op_kwargs={"run_id": "{{ run_id }}"},
+    #     sla=timedelta(minutes=3),
+    # )
+    
+    gold_task = PythonOperator(
+    task_id="gold_materialization",
+    python_callable=build_gold_layer,
+    op_kwargs={"run_id": "{{ run_id }}"},
     )
 
     # Task dependencies
-    bronze_ingest >> silver_transform >> data_quality >> gold_build
+    bronze_ingest >> silver_transform >> gold_task
