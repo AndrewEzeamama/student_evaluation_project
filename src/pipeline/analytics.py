@@ -1,141 +1,116 @@
-import duckdb
 import pandas as pd
 from datetime import datetime
 
-from src.core.config import SILVER_DIR, DUCKDB_PATH
+from src.core.config import SILVER_DIR, GOLD_DIR
 from src.core.logging import get_logger
+from src.core.audit import write_audit_record
+from src.core.duckdb_conn import get_duckdb_connection
 
 logger = get_logger("GOLD_ANALYTICS")
 
 
 def build_gold_layer(run_id: str):
-    start_time = datetime.utcnow()
-    con = duckdb.connect(DUCKDB_PATH)
+    """
+    Build analytics-ready Gold layer (Star Schema) and persist to DuckDB + Parquet.
+    """
 
     try:
-        logger.info("Starting Gold layer materialization")
+        con = get_duckdb_connection()
 
         # -------------------------
-        # Load Silver Data
+        # Load Silver datasets
         # -------------------------
         students = pd.read_parquet(SILVER_DIR / "students.parquet")
         teachers = pd.read_parquet(SILVER_DIR / "teachers.parquet")
-        schools = pd.read_parquet(SILVER_DIR / "schools.parquet")
+        schools = pd.read_parquet(SILVER_DIR / "schools.parquet")   
         tests = pd.read_parquet(SILVER_DIR / "tests.parquet")
         test_details = pd.read_parquet(SILVER_DIR / "test_details.parquet")
-
-        # -------------------------
-        # Register DataFrames
-        # -------------------------
-        con.register("students_df", students)
-        con.register("teachers_df", teachers)
-        con.register("schools_df", schools)
-        con.register("tests_df", tests)
-        con.register("test_details_df", test_details)
+        grading_groups = pd.read_parquet(SILVER_DIR / "grading_groups.parquet")
 
         # -------------------------
         # Dimensions
         # -------------------------
-        con.execute("""
-            INSERT OR REPLACE INTO dim_student
-            SELECT
-                ROW_NUMBER() OVER () AS student_key,
-                student_id,
-                student_name
-            FROM students_df
-        """)
-
-        con.execute("""
-            INSERT OR REPLACE INTO dim_teacher
-            SELECT
-                ROW_NUMBER() OVER () AS teacher_key,
-                teacher_id,
-                teacher_name
-            FROM teachers_df
-        """)
-
-        con.execute("""
-            INSERT OR REPLACE INTO dim_school
-            SELECT
-                ROW_NUMBER() OVER () AS school_key,
-                school_id,
-                school_name,
-                municipality
-            FROM schools_df
-        """)
-
-        con.execute("""
-            INSERT OR REPLACE INTO dim_test
-            SELECT
-                ROW_NUMBER() OVER () AS test_key,
-                test_id,
-                test_name,
-                assessment_type
-            FROM tests_df
-        """)
+        dim_student = students.assign(student_key=lambda df: df.index + 1)
+        dim_teacher = teachers.assign(teacher_key=lambda df: df.index + 1)
+        dim_school = schools.assign(school_key=lambda df: df.index + 1)
+        dim_test = tests.assign(test_key=lambda df: df.index + 1)
+        dim_grading_group = grading_groups.assign(
+            grading_group_key=lambda df: df.index + 1
+        )
 
         # -------------------------
-        # Fact Table
+        # Fact table
+        # Grain: one test result
         # -------------------------
-        con.execute("""
-            INSERT OR REPLACE INTO fact_test_results
-            SELECT
-                ROW_NUMBER() OVER () AS test_result_key,
-                s.student_key,
-                t.teacher_key,
-                sc.school_key,
-                te.test_key,
-                td.exam_date,
-                td.score
-            FROM test_details_df td
-            JOIN dim_student s ON td.student_id = s.student_id
-            JOIN dim_teacher t ON td.teacher_id = t.teacher_id
-            JOIN dim_school sc ON td.school_id = sc.school_id
-            JOIN dim_test te ON td.test_id = te.test_id
-        """)
-
-        row_count = con.execute(
-            "SELECT COUNT(*) FROM fact_test_results"
-        ).fetchone()[0]
+        fact_test_results = (
+            test_details
+            .merge(dim_test, on="test_id", how="left")
+            .merge(dim_grading_group, on="grading_group_id", how="left")
+            .loc[:, [
+                "test_key",
+                "grading_group_key",
+                "score",
+                "exam_date"
+            ]]
+        )
 
         # -------------------------
-        # AUDIT: SUCCESS
+        # DuckDB Materialization
         # -------------------------
-        con.execute("""
-            INSERT INTO audit_pipeline_runs
-            VALUES (
-                nextval('audit_pipeline_runs_seq'),
-                ?, 'gold_layer', 'SUCCESS', ?, NULL, ?, ?
-            )
-        """, (
-            run_id,
-            row_count,
-            start_time,
-            datetime.utcnow()
-        ))
+        con.execute("CREATE SCHEMA IF NOT EXISTS gold")
 
-        logger.info("Gold layer materialized successfully")
+        con.execute("DROP TABLE IF EXISTS gold.dim_student")
+        con.execute("DROP TABLE IF EXISTS gold.dim_teacher")
+        con.execute("DROP TABLE IF EXISTS gold.dim_school")
+        con.execute("DROP TABLE IF EXISTS gold.dim_test")
+        con.execute("DROP TABLE IF EXISTS gold.dim_grading_group")
+        con.execute("DROP TABLE IF EXISTS gold.fact_test_results")
+
+        con.register("dim_student_df", dim_student)
+        con.register("dim_teacher_df", dim_teacher)
+        con.register("dim_school_df", dim_school)
+        con.register("dim_test_df", dim_test)
+        con.register("dim_grading_group_df", dim_grading_group)
+        con.register("fact_df", fact_test_results)
+
+        con.execute("CREATE TABLE gold.dim_student AS SELECT * FROM dim_student_df")
+        con.execute("CREATE TABLE gold.dim_teacher AS SELECT * FROM dim_teacher_df")
+        con.execute("CREATE TABLE gold.dim_school AS SELECT * FROM dim_school_df")
+        con.execute("CREATE TABLE gold.dim_test AS SELECT * FROM dim_test_df")
+        con.execute("CREATE TABLE gold.dim_grading_group AS SELECT * FROM dim_grading_group_df")
+        con.execute("CREATE TABLE gold.fact_test_results AS SELECT * FROM fact_df")
+
+        # -------------------------
+        # Parquet Output
+        # -------------------------
+        dim_student.to_parquet(GOLD_DIR / "dim_student.parquet", index=False)
+        dim_teacher.to_parquet(GOLD_DIR / "dim_teacher.parquet", index=False)
+        dim_school.to_parquet(GOLD_DIR / "dim_school.parquet", index=False)
+        dim_test.to_parquet(GOLD_DIR / "dim_test.parquet", index=False)
+        dim_grading_group.to_parquet(GOLD_DIR / "dim_grading_group.parquet", index=False)
+        fact_test_results.to_parquet(
+            GOLD_DIR / "fact_test_results.parquet", index=False
+        )
+
+        # -------------------------
+        # Audit
+        # -------------------------
+        write_audit_record(
+            run_id=run_id,
+            stage="gold_materialization",
+            status="SUCCESS",
+            row_count=len(fact_test_results)
+        )
+
+        logger.info("Gold layer successfully materialized")
 
     except Exception as e:
-        logger.error("Gold layer failed", exc_info=True)
+        logger.exception("Gold layer failed")
 
-        # -------------------------
-        # AUDIT: FAILURE
-        # -------------------------
-        con.execute("""
-            INSERT INTO audit_pipeline_runs
-            VALUES (
-                nextval('audit_pipeline_runs_seq'),
-                ?, 'gold_layer', 'FAILED', 0, ?, ?, ?
-            )
-        """, (
-            run_id,
-            str(e),
-            start_time,
-            datetime.utcnow()
-        ))
-
+        write_audit_record(
+            run_id=run_id,
+            stage="gold_materialization",
+            status="FAILED",
+            error_message=str(e)
+        )
         raise
-
-    finally:
-        con.close()

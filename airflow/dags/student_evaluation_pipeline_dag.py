@@ -5,7 +5,6 @@ from datetime import timedelta
 
 from src.pipeline.ingest import ingest_excel
 from src.pipeline.transform import transform_silver
-# from src.quality.ge_runner import run_quality_checks
 from src.pipeline.analytics import build_gold_layer
 
 # -------------------------------
@@ -22,7 +21,7 @@ default_args = {
 # DAG Definition
 # -------------------------------
 with DAG(
-    dag_id="student_evaluation",
+    dag_id="student_evaluation_pipeline",
     default_args=default_args,
     description="Student Evaluation Analytics Pipeline (Bronze → Gold)",
     start_date=days_ago(1),
@@ -44,13 +43,6 @@ with DAG(
         op_kwargs={"run_id": "{{ run_id }}"},
         sla=timedelta(minutes=5),
     )
-
-    # data_quality = PythonOperator(
-    #     task_id="data_quality_checks",
-    #     python_callable=run_quality_checks,
-    #     op_kwargs={"run_id": "{{ run_id }}"},
-    #     sla=timedelta(minutes=3),
-    # )
     
     gold_task = PythonOperator(
     task_id="gold_materialization",
