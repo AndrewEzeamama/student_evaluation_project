@@ -8,7 +8,7 @@ RUN apt-get update && \
 
 USER airflow
 
-# Copy project files (relative to repo root)
+# Copy project assets (context = repo root)
 COPY src /opt/airflow/src
 COPY sql /opt/airflow/sql
 COPY data /opt/airflow/data
