@@ -245,4 +245,5 @@ This pipeline provides a strong foundation for:
 - Enterprise-scale data engineering
 - AI and predictive intelligence
 
-It is intentionally designed to evolve without architectural rework. It provides a production-grade foundation for analytics today and predictive intelligence in the future.
+It is intentionally designed to evolve without architectural rework. 
+It provides a production-grade foundation for analytics today and predictive intelligence in the future.
