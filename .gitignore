@@ -216,7 +216,8 @@ logs
 *.log
 *.parquet
 *.duckdb*
-
+_v
+*_v
 
 # Ignore Airflow SQLite DB
 airflow.db
