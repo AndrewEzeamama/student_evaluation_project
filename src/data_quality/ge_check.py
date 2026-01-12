@@ -3,20 +3,24 @@ import great_expectations as ge
 from datetime import datetime
 from pathlib import Path
 
-from src.core.config import SILVER_DIR, QUARANTINE_DIR
+from src.core.config import SILVER_DIR, GOLD_DIR, QUARANTINE_DIR
 from src.core.logging import get_logger
 
 logger = get_logger("DATA_QUALITY")
 
 # -----------------------------------------------------
-# Critical columns per dataset (Completeness + Uniqueness)
+# Completeness & Uniqueness Rules
 # -----------------------------------------------------
 CRITICAL_COLUMNS = {
     "schools": ["school_id"],
-    "teachers": ["teacher_id"],
     "students": ["student_id"],
     "grading_groups": ["assessment_level_id"],
     "test_details": ["assessment_type"],
+}
+
+# Composite key rule
+COMPOSITE_KEYS = {
+    "teachers": ["teacher_id", "school_id", "school_year", "course_name", "course_no"],
 }
 
 # -----------------------------------------------------
@@ -24,9 +28,8 @@ CRITICAL_COLUMNS = {
 # -----------------------------------------------------
 def run_ge_checks(run_id: str):
     """
-    Non-blocking Data Quality checks.
-    - Writes failed records per dataset to quarantine/
-    - Never raises exception (pipeline continues)
+    Non-blocking Data Engineering + Data Quality checks.
+    Failed rows are quarantined per dataset.
     """
 
     context = ge.get_context()
@@ -38,90 +41,122 @@ def run_ge_checks(run_id: str):
         "students": SILVER_DIR / "students.parquet",
         "grading_groups": SILVER_DIR / "grading_groups.parquet",
         "test_details": SILVER_DIR / "test_details.parquet",
-        "tests": SILVER_DIR / "tests.parquet",  # date checks only
+        "tests": SILVER_DIR / "tests.parquet",
+        "fact_test_results": GOLD_DIR / "fact_test_results.parquet",
     }
 
-    for dataset_name, parquet_path in datasets.items():
-        if not parquet_path.exists():
-            logger.warning(f"[DQ] Skipping missing file: {parquet_path.name}")
-            continue
-
-        logger.info(f"[DQ] Checking dataset: {dataset_name}")
-
-        df = pd.read_parquet(parquet_path)
-        failed_mask = pd.Series(False, index=df.index)
-
-        # -------------------------------------------------
-        # Initialize GE validator (reporting only)
-        # -------------------------------------------------
-        validator = context.sources.pandas_default.read_dataframe(
-            df,
-            asset_name=dataset_name,
+    grading_groups = None
+    if (SILVER_DIR / "grading_groups.parquet").exists():
+        grading_groups = pd.read_parquet(
+            SILVER_DIR / "grading_groups.parquet"
         )
 
-        # =================================================
-        # 1. Completeness & Uniqueness Checks
-        # =================================================
-        for col in CRITICAL_COLUMNS.get(dataset_name, []):
+    for dataset, path in datasets.items():
+        if not path.exists():
+            logger.warning(f"[DQ] Skipping missing dataset: {dataset}")
+            continue
+
+        logger.info(f"[DQ] Processing {dataset}")
+        df = pd.read_parquet(path)
+        failed_mask = pd.Series(False, index=df.index)
+
+        validator = context.sources.pandas_default.read_dataframe(
+            df, asset_name=dataset
+        )
+
+        # -------------------------------------------------
+        # 1. Completeness & Uniqueness (Single Column)
+        # -------------------------------------------------
+        for col in CRITICAL_COLUMNS.get(dataset, []):
             if col not in df.columns:
-                logger.warning(f"[DQ] Column '{col}' missing in {dataset_name}")
                 continue
 
-            # GE expectations (metrics & documentation)
             validator.expect_column_values_to_not_be_null(col)
             validator.expect_column_values_to_be_unique(col)
 
-            # Pandas logic (row-level quarantine)
             failed_mask |= df[col].isnull()
             failed_mask |= df[col].duplicated(keep=False)
 
-        # =================================================
-        # 2. Consistency & Validity – assessment_date (tests only)
-        # =================================================
-        if dataset_name == "tests" and "assessment_date" in df.columns:
+        # -------------------------------------------------
+        # 2. Teachers Composite Key Rule
+        # -------------------------------------------------
+        if dataset == "teachers":
+            keys = COMPOSITE_KEYS["teachers"]
+
+            validator.expect_compound_columns_to_be_unique(keys)
+
+            failed_mask |= df[keys].isnull().any(axis=1)
+            failed_mask |= df.duplicated(subset=keys, keep=False)
+
+        # -------------------------------------------------
+        # 3. Assessment Date Validity (tests only)
+        # -------------------------------------------------
+        if dataset == "tests" and "assessment_date" in df.columns:
             today = datetime.today().date()
 
-            parsed_dates = pd.to_datetime(
+            parsed = pd.to_datetime(
                 df["assessment_date"],
                 format="%d/%m/%Y",
-                errors="coerce",
+                errors="coerce"
             )
 
-            invalid_date_mask = (
-                parsed_dates.isna() |
-                (parsed_dates.dt.date > today)
-            )
+            invalid_dates = parsed.isna() | (parsed.dt.date > today)
+            failed_mask |= invalid_dates
 
-            failed_mask |= invalid_date_mask
-
-            logger.info(
-                f"[DQ] tests.assessment_date → "
-                f"{invalid_date_mask.sum()} invalid rows detected"
-            )
+            validator.expect_column_values_to_not_be_null("assessment_date")
 
         # -------------------------------------------------
-        # Execute GE validation (non-blocking, report only)
+        # 4. DE Rule – Valid Score Ranges
         # -------------------------------------------------
-        _ = validator.validate()
+        if dataset == "fact_test_results" and grading_groups is not None:
+            if {"standard_score", "assessment_level_id"}.issubset(df.columns):
+                merged = df.merge(
+                    grading_groups[
+                        ["assessment_level_id", "score_min", "score_max"]
+                    ],
+                    on="assessment_level_id",
+                    how="left"
+                )
+
+                invalid_scores = (
+                    merged["standard_score"].isnull() |
+                    (merged["standard_score"] < merged["score_min"]) |
+                    (merged["standard_score"] > merged["score_max"])
+                )
+
+                failed_mask |= invalid_scores
+
+                validator.expect_column_values_to_be_between(
+                    "standard_score",
+                    min_value=merged["score_min"].min(),
+                    max_value=merged["score_max"].max(),
+                )
+
+                logger.info(
+                    f"[DQ] Invalid score rows: {invalid_scores.sum()}"
+                )
 
         # -------------------------------------------------
-        # Quarantine failed records per dataset
+        # GE validation (reporting only)
+        # -------------------------------------------------
+        validator.validate()
+
+        # -------------------------------------------------
+        # Quarantine
         # -------------------------------------------------
         if failed_mask.any():
-            failed_df = df.loc[failed_mask]
-
-            quarantine_file = (
+            out = (
                 QUARANTINE_DIR /
-                f"{dataset_name}_dq_failed_{run_id}.parquet"
+                f"{dataset}_dq_failed_{run_id}.parquet"
             )
 
-            failed_df.to_parquet(quarantine_file, index=False)
+            df.loc[failed_mask].to_parquet(out, index=False)
 
             logger.error(
-                f"[DQ FAILED] {dataset_name}: "
-                f"{len(failed_df)} rows quarantined → {quarantine_file.name}"
+                f"[DQ FAILED] {dataset}: "
+                f"{failed_mask.sum()} rows → {out.name}"
             )
         else:
-            logger.info(f"[DQ PASSED] {dataset_name}")
+            logger.info(f"[DQ PASSED] {dataset}")
 
-    logger.info("[DQ] Data Quality checks completed (non-blocking)")
+    logger.info("[DQ] All Data Quality checks completed (non-blocking)")

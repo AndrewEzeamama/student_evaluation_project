@@ -21,12 +21,6 @@ CREATE TABLE IF NOT EXISTS dim_school (
     municipality    VARCHAR
 );
 
-CREATE TABLE IF NOT EXISTS dim_test (
-    test_key        INTEGER PRIMARY KEY,
-    test_id         VARCHAR,
-    test_name       VARCHAR,
-    assessment_type VARCHAR
-);
 
 -- ------------------------------------------------------
 -- -- FACT TABLE
